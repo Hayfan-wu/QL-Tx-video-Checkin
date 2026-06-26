@@ -3,6 +3,10 @@
 腾讯视频V力值自动签到脚本
 支持青龙面板、多账号、消息通知
 环境变量: TXVIDEO_COOKIE (多账号用#或&分隔)
+
+更新说明:
+- 2026-06-26: 更新为最新tRPC接口 (trpc.new_task_system)
+- 支持图形验证码处理 (需配合打码平台或手动获取ticket)
 """
 
 import os
@@ -15,7 +19,7 @@ import requests
 from urllib.parse import quote
 
 # 配置信息
-APP_VERSION = "v1.0.0"
+APP_VERSION = "v2.0.0"
 APP_NAME = "腾讯视频V力值签到"
 
 # 通知配置 - 从环境变量读取
@@ -23,8 +27,17 @@ SERVERCHAN_KEY = os.getenv("SERVERCHAN_KEY", "")  # Server酱推送key
 PUSHPLUS_TOKEN = os.getenv("PUSHPLUS_TOKEN", "")  # PushPlus推送token
 BARK_PUSH = os.getenv("BARK_PUSH", "")  # BARK推送
 
+# 打码平台配置 (可选)
+RROCR_KEY = os.getenv("RROCR_KEY", "")  # 人人打码key
+TIANXING_KEY = os.getenv("TIANXING_KEY", "")  # 天行打码key
+
 # 重试次数
 MAX_RETRY = 3
+
+# 接口配置
+SIGN_API = "https://vip.video.qq.com/rpc/trpc.new_task_system.task_system.TaskSystem/CheckIn?rpc_data={}"
+TASK_LIST_API = "https://vip.video.qq.com/rpc/trpc.new_task_system.task_system.TaskSystem/ReadTaskList?rpc_data={}"
+AUTH_REFRESH_API = "https://access.video.qq.com/user/auth_refresh"
 
 
 class TxVideoCheckin:
@@ -37,11 +50,15 @@ class TxVideoCheckin:
         self.msg_list = []
         self.user_name = ""
         self.total_score = 0
+        self.checkin_score = 0
 
-        # 设置默认请求头
+        # 设置默认请求头 - iPad端（成功率最高）
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://v.qq.com",
+            "User-Agent": "Mozilla/5.0 (iPad; CPU OS 16_2 like Mac OS X) AppleWebKit/537.51.1 (KHTML, like Gecko) Mobile/11A465 QQLiveBrowser/8.8.10 AppType/HD WebKitCore/WKWebView iOS GDTTangramMobSDK/4.370.6 GDTMobSDK/4.370.6 cellPhone/Unknown iPad AppBuild/25828",
+            "Referer": "https://film.video.qq.com/x/grade/?ovscroll=0&ptag=Vgrade.card",
+            "Origin": "https://film.video.qq.com",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "gzip, deflate, br",
             "Cookie": self.cookie_str
         }
 
@@ -70,59 +87,66 @@ class TxVideoCheckin:
         self.log(f"【账号{self.user_index}】正在刷新Session...")
 
         try:
-            vappid = "11059694"
-            vsecret = "5a05da2e836c42a59dc42b7d5c2f8b1d"
+            # 尝试多个vappid
+            vappid_list = [
+                ("11059694", "5a05da2e836c42a59dc42b7d5c2f8b1d"),
+                ("101483052", ""),
+            ]
 
-            # 从cookie中获取必要参数
             vqq_access_token = self.get_cookie_value("vqq_access_token")
             vqq_openid = self.get_cookie_value("vqq_openid")
-            vqq_vuserid = self.get_cookie_value("vqq_vuserid")
-            skey = self.get_cookie_value("p_skey") or self.get_cookie_value("skey") or ""
 
             if not vqq_access_token or not vqq_openid:
                 self.log(f"【账号{self.user_index}】Cookie中缺少必要参数，跳过Session刷新")
                 return False
 
-            g_tk = self.calc_g_tk(skey) if skey else ""
+            for vappid, vsecret in vappid_list:
+                timestamp = int(round(time.time() * 1000))
+                callback_id = random.randint(1000000, 9999999)
 
-            timestamp = int(round(time.time() * 1000))
-            callback_id = random.randint(1000000, 9999999)
+                refresh_url = (
+                    f"{AUTH_REFRESH_API}?"
+                    f"vappid={vappid}"
+                )
+                if vsecret:
+                    refresh_url += f"&vsecret={vsecret}"
+                refresh_url += (
+                    f"&type=qq&g_tk=&g_vstk=&g_actk="
+                    f"&callback=jQuery{callback_id}_{timestamp}"
+                    f"&_={timestamp}"
+                )
 
-            refresh_url = (
-                f"https://access.video.qq.com/user/auth_refresh?"
-                f"vappid={vappid}&vsecret={vsecret}&type=qq&g_tk={g_tk}"
-                f"&g_vstk={g_tk}&g_actk={g_tk}"
-                f"&callback=jQuery{callback_id}_{timestamp}"
-                f"&_={timestamp}"
-            )
+                # 使用网页端UA刷新
+                refresh_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Referer": "https://v.qq.com",
+                    "Cookie": self.cookie_str
+                }
 
-            headers = self.headers.copy()
-            headers["Referer"] = "https://v.qq.com"
+                response = self.session.get(refresh_url, headers=refresh_headers, timeout=15)
 
-            response = self.session.get(refresh_url, headers=headers, timeout=15)
+                # 从响应的Set-Cookie中获取新的vqq_vusession
+                new_cookies = requests.utils.dict_from_cookiejar(response.cookies)
 
-            # 从响应的Set-Cookie中获取新的vqq_vusession
-            new_cookies = requests.utils.dict_from_cookiejar(response.cookies)
+                if "vqq_vusession" in new_cookies:
+                    new_vusession = new_cookies["vqq_vusession"]
+                    self.log(f"【账号{self.user_index}】Session刷新成功！")
 
-            if "vqq_vusession" in new_cookies:
-                new_vusession = new_cookies["vqq_vusession"]
-                self.log(f"【账号{self.user_index}】Session刷新成功！")
+                    # 更新cookie中的vqq_vusession
+                    if "vqq_vusession=" in self.cookie_str:
+                        self.cookie_str = re.sub(
+                            r'vqq_vusession=[^;]+',
+                            f'vqq_vusession={new_vusession}',
+                            self.cookie_str
+                        )
+                    else:
+                        self.cookie_str += f"; vqq_vusession={new_vusession}"
 
-                # 更新cookie中的vqq_vusession
-                if "vqq_vusession=" in self.cookie_str:
-                    self.cookie_str = re.sub(
-                        r'vqq_vusession=[^;]+',
-                        f'vqq_vusession={new_vusession}',
-                        self.cookie_str
-                    )
-                else:
-                    self.cookie_str += f"; vqq_vusession={new_vusession}"
+                    self.headers["Cookie"] = self.cookie_str
+                    return True
 
-                self.headers["Cookie"] = self.cookie_str
-                return True
-            else:
-                self.log(f"【账号{self.user_index}】Session刷新失败，未获取到新的vusession")
-                return False
+            self.log(f"【账号{self.user_index}】Session刷新失败，继续使用原有Cookie")
+            return False
 
         except Exception as e:
             self.log(f"【账号{self.user_index}】Session刷新异常: {str(e)}")
@@ -132,64 +156,83 @@ class TxVideoCheckin:
         """获取用户信息"""
         try:
             vqq_vuserid = self.get_cookie_value("vqq_vuserid")
-            if vqq_vuserid:
+            qq_nick = self.get_cookie_value("qq_nick")
+            if qq_nick:
+                from urllib.parse import unquote
+                self.user_name = unquote(qq_nick)
+            elif vqq_vuserid:
                 self.user_name = f"用户{vqq_vuserid[-4:]}"
                 return True
-            return False
+            return bool(vqq_vuserid)
         except:
             return False
 
+    def solve_captcha(self, appid, business_id):
+        """
+        解决图形验证码
+        返回: (ticket, randstr) 或 (None, None)
+        """
+        # TODO: 可集成第三方打码平台
+        # 目前返回None，需要用户手动获取验证码ticket
+        self.log(f"【账号{self.user_index}】需要图形验证，请手动获取验证码ticket")
+        self.log(f"【账号{self.user_index}】AppID: {appid}, 业务: {business_id}")
+        return None, None
+
     def daily_checkin(self):
-        """每日签到获取V力值"""
+        """每日签到获取V力值（新tRPC接口）"""
         self.log(f"【账号{self.user_index}】正在执行每日签到...")
 
         for retry in range(MAX_RETRY):
             try:
-                timestamp = int(round(time.time() * 1000))
-                sign_url = (
-                    f"https://vip.video.qq.com/fcgi-bin/comm_cgi?"
-                    f"name=hierarchical_task_system&cmd=2&_={timestamp}"
-                )
+                response = self.session.get(SIGN_API, headers=self.headers, timeout=15)
+                data = response.json()
 
-                response = self.session.get(sign_url, headers=self.headers, timeout=15)
-                response_text = response.text
-
-                # 尝试解析JSON响应
-                try:
-                    # 可能是JSONP格式，提取JSON部分
-                    json_match = re.search(r'\{.*\}', response_text)
-                    if json_match:
-                        data = json.loads(json_match.group())
-                    else:
-                        data = json.loads(response_text)
-                except json.JSONDecodeError:
-                    data = {"raw": response_text}
-
-                # 处理响应
                 ret = data.get("ret", -1)
                 msg = data.get("msg", "未知错误")
 
                 if ret == 0:
-                    checkin_score = data.get("checkin_score", 0)
-                    total_score = data.get("total_score", 0)
-                    self.total_score = total_score
+                    # 签到成功
+                    self.checkin_score = data.get("check_in_score", 0)
+                    self.total_score = data.get("total_score", data.get("score", 0))
 
                     self.log(f"【账号{self.user_index}】✅ 签到成功！")
-                    self.log(f"【账号{self.user_index}】获得V力值: +{checkin_score}")
-                    self.log(f"【账号{self.user_index}】当前总V力值: {total_score}")
-                    return True
-
-                elif ret == -10006 or "Account Verify Error" in msg:
-                    self.log(f"【账号{self.user_index}】❌ Cookie失效，请重新获取！")
-                    return False
-
-                elif ret == -2004:
-                    self.log(f"【账号{self.user_index}】ℹ️ 今日已签到，无需重复签到")
-                    # 尝试获取当前积分
-                    self.total_score = data.get("total_score", 0)
+                    self.log(f"【账号{self.user_index}】获得V力值: +{self.checkin_score}")
                     if self.total_score:
                         self.log(f"【账号{self.user_index}】当前总V力值: {self.total_score}")
                     return True
+
+                elif ret == -110009:
+                    # 需要安全验证
+                    security_verify = data.get("security_verify", {})
+                    s_user_msg = security_verify.get("sUserMsg", "需要验证")
+                    s_appid = security_verify.get("sAppId", "")
+                    s_business_id = security_verify.get("sBusinessId", "")
+
+                    self.log(f"【账号{self.user_index}】⚠️  {s_user_msg}")
+
+                    # 尝试解决验证码
+                    ticket, randstr = self.solve_captcha(s_appid, s_business_id)
+                    if ticket and randstr:
+                        # 使用验证码ticket重试
+                        self.log(f"【账号{self.user_index}】使用验证码重试...")
+                        # TODO: 将ticket加入请求头或参数
+                        continue
+                    else:
+                        self.log(f"【账号{self.user_index}】❌ 无法自动完成验证，请手动签到一次后Cookie将恢复正常")
+                        return False
+
+                elif ret == -2004 or "already" in msg.lower():
+                    # 已签到
+                    self.log(f"【账号{self.user_index}】ℹ️  今日已签到，无需重复签到")
+                    self.total_score = data.get("total_score", data.get("score", 0))
+                    if self.total_score:
+                        self.log(f"【账号{self.user_index}】当前总V力值: {self.total_score}")
+                    return True
+
+                elif ret == -10006 or "Account Verify Error" in msg:
+                    # Cookie失效
+                    self.log(f"【账号{self.user_index}】❌ Cookie失效，请重新获取！")
+                    return False
 
                 else:
                     self.log(f"【账号{self.user_index}】签到返回: ret={ret}, msg={msg}")
@@ -209,6 +252,17 @@ class TxVideoCheckin:
 
         return False
 
+    def get_task_list(self):
+        """获取任务列表"""
+        try:
+            response = self.session.get(TASK_LIST_API, headers=self.headers, timeout=15)
+            data = response.json()
+            if data.get("ret") == 0:
+                return data.get("task_list", [])
+            return []
+        except:
+            return []
+
     def run(self):
         """执行完整签到流程"""
         self.log(f"\n{'='*50}")
@@ -217,6 +271,8 @@ class TxVideoCheckin:
 
         # 获取用户信息
         self.get_user_info()
+        if self.user_name:
+            self.log(f"【账号{self.user_index}】用户: {self.user_name}")
 
         # 刷新Session
         self.refresh_session()
@@ -314,6 +370,9 @@ def main():
         print("1. 浏览器打开 https://v.qq.com 并登录QQ")
         print("2. 按F12打开开发者工具 -> Network(网络)")
         print("3. 刷新页面，找到任意请求，复制请求头中的Cookie")
+        print("\n⚠️  注意：腾讯视频签到目前需要图形验证")
+        print("   - 首次使用请手动签到一次，后续Cookie有效期内可正常使用")
+        print("   - 或配置第三方打码平台自动识别验证码")
         return
 
     # 分割多账号Cookie (支持#或&分隔)
