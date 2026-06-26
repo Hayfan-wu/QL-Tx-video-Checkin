@@ -5,8 +5,9 @@
 环境变量: TXVIDEO_COOKIE (多账号用#或&分隔)
 
 更新说明:
-- 2026-06-26: 更新为最新tRPC接口 (trpc.new_task_system)
-- 支持图形验证码处理 (需配合打码平台或手动获取ticket)
+- 2026-06-26 v2.1.0: 优化设备指纹模拟，增加多种签到模式
+- 2026-06-26 v2.0.1: 修复Cookie换行符导致的InvalidHeaderError
+- 2026-06-26 v2.0.0: 更新为最新tRPC接口 (trpc.new_task_system)
 """
 
 import os
@@ -19,7 +20,7 @@ import requests
 from urllib.parse import quote
 
 # 配置信息
-APP_VERSION = "v2.0.1"
+APP_VERSION = "v2.1.0"
 APP_NAME = "腾讯视频V力值签到"
 
 # 通知配置 - 从环境变量读取
@@ -67,28 +68,92 @@ def clean_cookie(cookie_str):
     return cookie_str
 
 
+def generate_device_id():
+    """生成随机设备ID"""
+    chars = "0123456789abcdef"
+    return ''.join(random.choice(chars) for _ in range(32))
+
+
 class TxVideoCheckin:
     """腾讯视频签到类"""
 
     def __init__(self, cookie_str, user_index=1):
         # 清理Cookie，移除换行符等无效字符
-        self.cookie_str = clean_cookie(cookie_str)
+        self.raw_cookie = clean_cookie(cookie_str)
+        self.cookie_str = self.raw_cookie
         self.user_index = user_index
         self.session = requests.Session()
         self.msg_list = []
         self.user_name = ""
         self.total_score = 0
         self.checkin_score = 0
-
+        
+        # 生成设备指纹
+        self.device_guid = generate_device_id()
+        self.qimei36 = generate_device_id() + "00000"
+        
+        # 构建增强版Cookie（添加设备指纹）
+        self._build_enhanced_cookie()
+        
         # 设置默认请求头 - iPad端（成功率最高）
-        self.headers = {
-            "User-Agent": "Mozilla/5.0 (iPad; CPU OS 16_2 like Mac OS X) AppleWebKit/537.51.1 (KHTML, like Gecko) Mobile/11A465 QQLiveBrowser/8.8.10 AppType/HD WebKitCore/WKWebView iOS GDTTangramMobSDK/4.370.6 GDTMobSDK/4.370.6 cellPhone/Unknown iPad AppBuild/25828",
-            "Referer": "https://film.video.qq.com/x/grade/?ovscroll=0&ptag=Vgrade.card",
-            "Origin": "https://film.video.qq.com",
+        self.headers = self._build_headers("ipad")
+
+    def _build_headers(self, mode="ipad"):
+        """构建请求头"""
+        base_headers = {
             "Accept": "application/json, text/plain, */*",
             "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Cookie": self.cookie_str
         }
+        
+        if mode == "ipad":
+            base_headers.update({
+                "User-Agent": "Mozilla/5.0 (iPad; CPU OS 16_2 like Mac OS X) AppleWebKit/537.51.1 (KHTML, like Gecko) Mobile/11A465 QQLiveBrowser/8.8.10 AppType/HD WebKitCore/WKWebView iOS GDTTangramMobSDK/4.370.6 GDTMobSDK/4.370.6 cellPhone/Unknown iPad AppBuild/25828",
+                "Referer": "https://film.video.qq.com/x/grade/?ovscroll=0&ptag=Vgrade.card&source=page_id=default&ztid=default",
+                "Origin": "https://film.video.qq.com",
+                "Host": "vip.video.qq.com",
+            })
+        elif mode == "pc":
+            base_headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://v.qq.com",
+                "Host": "vip.video.qq.com",
+            })
+        elif mode == "iphone":
+            base_headers.update({
+                "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 QQLiveBrowser/8.8.10 AppType/iphone WebKitCore/WKWebView iOS GDTTangramMobSDK/4.370.6 GDTMobSDK/4.370.6 cellPhone/iPhone13 AppBuild/25828",
+                "Referer": "https://film.video.qq.com/x/grade/?ovscroll=0&ptag=Vgrade.card",
+                "Origin": "https://film.video.qq.com",
+                "Host": "vip.video.qq.com",
+            })
+        
+        return base_headers
+
+    def _build_enhanced_cookie(self):
+        """构建增强版Cookie，添加设备指纹"""
+        # 从原始Cookie中提取已有字段
+        existing_keys = set()
+        for part in self.cookie_str.split(';'):
+            if '=' in part:
+                key = part.split('=')[0].strip()
+                existing_keys.add(key)
+        
+        # 添加缺少的设备指纹字段
+        extra_cookies = []
+        
+        device_fields = {
+            "video_guid": self.device_guid[:16],
+            "pgv_pvid": self.device_guid[:16],
+            "tvfe_boss_uuid": generate_device_id()[:16],
+        }
+        
+        for key, value in device_fields.items():
+            if key not in existing_keys:
+                extra_cookies.append(f"{key}={value}")
+        
+        if extra_cookies:
+            self.cookie_str = self.cookie_str + "; " + "; ".join(extra_cookies)
 
     def log(self, msg):
         """记录日志"""
@@ -115,10 +180,10 @@ class TxVideoCheckin:
         self.log(f"【账号{self.user_index}】正在刷新Session...")
 
         try:
-            # 尝试多个vappid
             vappid_list = [
                 ("11059694", "5a05da2e836c42a59dc42b7d5c2f8b1d"),
                 ("101483052", ""),
+                ("101527197", ""),
             ]
 
             vqq_access_token = self.get_cookie_value("vqq_access_token")
@@ -144,16 +209,14 @@ class TxVideoCheckin:
                     f"&_={timestamp}"
                 )
 
-                # 使用网页端UA刷新
                 refresh_headers = {
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Referer": "https://v.qq.com",
-                    "Cookie": self.cookie_str
+                    "Cookie": self.raw_cookie
                 }
 
                 response = self.session.get(refresh_url, headers=refresh_headers, timeout=15)
 
-                # 从响应的Set-Cookie中获取新的vqq_vusession
                 new_cookies = requests.utils.dict_from_cookiejar(response.cookies)
 
                 if "vqq_vusession" in new_cookies:
@@ -169,6 +232,14 @@ class TxVideoCheckin:
                         )
                     else:
                         self.cookie_str += f"; vqq_vusession={new_vusession}"
+
+                    # 更新原始cookie
+                    if "vqq_vusession=" in self.raw_cookie:
+                        self.raw_cookie = re.sub(
+                            r'vqq_vusession=[^;]+',
+                            f'vqq_vusession={new_vusession}',
+                            self.raw_cookie
+                        )
 
                     self.headers["Cookie"] = self.cookie_str
                     return True
@@ -187,7 +258,10 @@ class TxVideoCheckin:
             qq_nick = self.get_cookie_value("qq_nick")
             if qq_nick:
                 from urllib.parse import unquote
-                self.user_name = unquote(qq_nick)
+                try:
+                    self.user_name = unquote(qq_nick)
+                except:
+                    self.user_name = f"用户{vqq_vuserid[-4:]}" if vqq_vuserid else ""
             elif vqq_vuserid:
                 self.user_name = f"用户{vqq_vuserid[-4:]}"
                 return True
@@ -201,83 +275,85 @@ class TxVideoCheckin:
         返回: (ticket, randstr) 或 (None, None)
         """
         # TODO: 可集成第三方打码平台
-        # 目前返回None，需要用户手动获取验证码ticket
-        self.log(f"【账号{self.user_index}】需要图形验证，请手动获取验证码ticket")
+        self.log(f"【账号{self.user_index}】需要图形验证")
         self.log(f"【账号{self.user_index}】AppID: {appid}, 业务: {business_id}")
+        self.log(f"【账号{self.user_index}】💡 请手动签到一次后重新获取Cookie")
         return None, None
 
     def daily_checkin(self):
-        """每日签到获取V力值（新tRPC接口）"""
+        """每日签到获取V力值（新tRPC接口，多种模式尝试）"""
         self.log(f"【账号{self.user_index}】正在执行每日签到...")
 
-        for retry in range(MAX_RETRY):
-            try:
-                response = self.session.get(SIGN_API, headers=self.headers, timeout=15)
-                data = response.json()
+        # 尝试不同的签到模式
+        modes = ["ipad", "pc", "iphone"]
+        
+        for mode in modes:
+            self.log(f"【账号{self.user_index}】尝试 {mode.upper()} 端模式...")
+            headers = self._build_headers(mode)
+            
+            for retry in range(MAX_RETRY):
+                try:
+                    response = self.session.get(SIGN_API, headers=headers, timeout=15)
+                    data = response.json()
 
-                ret = data.get("ret", -1)
-                msg = data.get("msg", "未知错误")
+                    ret = data.get("ret", -1)
+                    msg = data.get("msg", "未知错误")
 
-                if ret == 0:
-                    # 签到成功
-                    self.checkin_score = data.get("check_in_score", 0)
-                    self.total_score = data.get("total_score", data.get("score", 0))
+                    if ret == 0:
+                        # 签到成功
+                        self.checkin_score = data.get("check_in_score", 0)
+                        self.total_score = data.get("total_score", data.get("score", 0))
 
-                    self.log(f"【账号{self.user_index}】✅ 签到成功！")
-                    self.log(f"【账号{self.user_index}】获得V力值: +{self.checkin_score}")
-                    if self.total_score:
-                        self.log(f"【账号{self.user_index}】当前总V力值: {self.total_score}")
-                    return True
+                        self.log(f"【账号{self.user_index}】✅ 签到成功！（{mode.upper()}端）")
+                        self.log(f"【账号{self.user_index}】获得V力值: +{self.checkin_score}")
+                        if self.total_score:
+                            self.log(f"【账号{self.user_index}】当前总V力值: {self.total_score}")
+                        return True
 
-                elif ret == -110009:
-                    # 需要安全验证
-                    security_verify = data.get("security_verify", {})
-                    s_user_msg = security_verify.get("sUserMsg", "需要验证")
-                    s_appid = security_verify.get("sAppId", "")
-                    s_business_id = security_verify.get("sBusinessId", "")
+                    elif ret == -110009:
+                        # 需要安全验证，切换下一个模式
+                        if retry == 0:
+                            security_verify = data.get("security_verify", {})
+                            s_user_msg = security_verify.get("sUserMsg", "需要验证")
+                            self.log(f"【账号{self.user_index}】⚠️  {s_user_msg}（{mode.upper()}端）")
+                        break  # 这个模式需要验证，换下一个模式
 
-                    self.log(f"【账号{self.user_index}】⚠️  {s_user_msg}")
+                    elif ret == -2004 or "already" in msg.lower():
+                        # 已签到
+                        self.log(f"【账号{self.user_index}】ℹ️  今日已签到，无需重复签到")
+                        self.total_score = data.get("total_score", data.get("score", 0))
+                        if self.total_score:
+                            self.log(f"【账号{self.user_index}】当前总V力值: {self.total_score}")
+                        return True
 
-                    # 尝试解决验证码
-                    ticket, randstr = self.solve_captcha(s_appid, s_business_id)
-                    if ticket and randstr:
-                        # 使用验证码ticket重试
-                        self.log(f"【账号{self.user_index}】使用验证码重试...")
-                        # TODO: 将ticket加入请求头或参数
-                        continue
-                    else:
-                        self.log(f"【账号{self.user_index}】❌ 无法自动完成验证，请手动签到一次后Cookie将恢复正常")
+                    elif ret == -10006 or "Account Verify Error" in msg:
+                        # Cookie失效
+                        self.log(f"【账号{self.user_index}】❌ Cookie失效，请重新获取！")
                         return False
 
-                elif ret == -2004 or "already" in msg.lower():
-                    # 已签到
-                    self.log(f"【账号{self.user_index}】ℹ️  今日已签到，无需重复签到")
-                    self.total_score = data.get("total_score", data.get("score", 0))
-                    if self.total_score:
-                        self.log(f"【账号{self.user_index}】当前总V力值: {self.total_score}")
-                    return True
+                    else:
+                        self.log(f"【账号{self.user_index}】签到返回: ret={ret}, msg={msg}")
+                        if retry < MAX_RETRY - 1:
+                            time.sleep(2)
+                            continue
+                        break  # 换下一个模式
 
-                elif ret == -10006 or "Account Verify Error" in msg:
-                    # Cookie失效
-                    self.log(f"【账号{self.user_index}】❌ Cookie失效，请重新获取！")
-                    return False
-
-                else:
-                    self.log(f"【账号{self.user_index}】签到返回: ret={ret}, msg={msg}")
+                except Exception as e:
+                    self.log(f"【账号{self.user_index}】签到异常: {str(e)}")
                     if retry < MAX_RETRY - 1:
-                        self.log(f"【账号{self.user_index}】第{retry + 1}次重试...")
                         time.sleep(2)
                         continue
-                    return False
+                    break
+            
+            # 模式之间加延迟
+            time.sleep(random.uniform(1, 2))
 
-            except Exception as e:
-                self.log(f"【账号{self.user_index}】签到异常: {str(e)}")
-                if retry < MAX_RETRY - 1:
-                    self.log(f"【账号{self.user_index}】第{retry + 1}次重试...")
-                    time.sleep(2)
-                    continue
-                return False
-
+        # 所有模式都失败了，给出详细建议
+        self.log(f"【账号{self.user_index}】❌ 所有模式均需要图形验证")
+        self.log(f"【账号{self.user_index}】💡 解决方案:")
+        self.log(f"【账号{self.user_index}】   1. 在手机APP或网页端手动签到一次")
+        self.log(f"【账号{self.user_index}】   2. 重新获取Cookie并更新到环境变量")
+        self.log(f"【账号{self.user_index}】   3. 确保青龙服务器IP与常用登录地一致")
         return False
 
     def get_task_list(self):
@@ -398,9 +474,9 @@ def main():
         print("1. 浏览器打开 https://v.qq.com 并登录QQ")
         print("2. 按F12打开开发者工具 -> Network(网络)")
         print("3. 刷新页面，找到任意请求，复制请求头中的Cookie")
-        print("\n⚠️  注意：腾讯视频签到目前需要图形验证")
-        print("   - 首次使用请手动签到一次，后续Cookie有效期内可正常使用")
-        print("   - 或配置第三方打码平台自动识别验证码")
+        print("\n⚠️  注意：腾讯视频签到可能需要图形验证")
+        print("   - 首次使用请手动签到一次，再获取Cookie")
+        print("   - 确保运行环境IP与常用登录地一致")
         return
 
     # 分割多账号Cookie (支持#或&分隔)
