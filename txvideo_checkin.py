@@ -19,7 +19,7 @@ import requests
 from urllib.parse import quote
 
 # 配置信息
-APP_VERSION = "v2.0.0"
+APP_VERSION = "v2.0.1"
 APP_NAME = "腾讯视频V力值签到"
 
 # 通知配置 - 从环境变量读取
@@ -40,11 +40,39 @@ TASK_LIST_API = "https://vip.video.qq.com/rpc/trpc.new_task_system.task_system.T
 AUTH_REFRESH_API = "https://access.video.qq.com/user/auth_refresh"
 
 
+def clean_cookie(cookie_str):
+    """
+    清理Cookie字符串，移除换行符、多余空格等无效字符
+    解决 InvalidHeaderError 报错问题
+    """
+    if not cookie_str:
+        return ""
+    
+    # 移除换行符和回车符
+    cookie_str = cookie_str.replace("\n", "").replace("\r", "")
+    # 移除制表符
+    cookie_str = cookie_str.replace("\t", "")
+    # 移除首尾空格
+    cookie_str = cookie_str.strip()
+    # 将多个连续空格替换为单个空格
+    cookie_str = re.sub(r' +', ' ', cookie_str)
+    # 清理分号前后的多余空格
+    cookie_str = re.sub(r'\s*;\s*', '; ', cookie_str)
+    # 移除首尾的分号和空格
+    cookie_str = cookie_str.strip('; ')
+    # 确保每个key=value对之间用 "; " 分隔
+    parts = [p.strip() for p in cookie_str.split(';') if p.strip()]
+    cookie_str = '; '.join(parts)
+    
+    return cookie_str
+
+
 class TxVideoCheckin:
     """腾讯视频签到类"""
 
     def __init__(self, cookie_str, user_index=1):
-        self.cookie_str = cookie_str.strip()
+        # 清理Cookie，移除换行符等无效字符
+        self.cookie_str = clean_cookie(cookie_str)
         self.user_index = user_index
         self.session = requests.Session()
         self.msg_list = []
@@ -378,11 +406,11 @@ def main():
     # 分割多账号Cookie (支持#或&分隔)
     cookie_list = []
     if "#" in cookie_env:
-        cookie_list = [c.strip() for c in cookie_env.split("#") if c.strip()]
+        cookie_list = [clean_cookie(c) for c in cookie_env.split("#") if c.strip()]
     elif "&" in cookie_env:
-        cookie_list = [c.strip() for c in cookie_env.split("&") if c.strip()]
+        cookie_list = [clean_cookie(c) for c in cookie_env.split("&") if c.strip()]
     else:
-        cookie_list = [cookie_env.strip()]
+        cookie_list = [clean_cookie(cookie_env)]
 
     print(f"📋 共检测到 {len(cookie_list)} 个账号\n")
 
